@@ -24,6 +24,7 @@ class UnclearReceipt(Exception):
 class Lesson:
     id: str
     name: str
+    course_id: str = ""
 
 
 class RainClient:
@@ -138,6 +139,11 @@ class RainClient:
         self.lesson = None
         (state_dir() / "session.dat").unlink(missing_ok=True)
 
+    def course_names(self):
+        courses, _ = self.request("GET", "/v/course_meta/learning_list/")
+        return {str(c["course_id"]): str(c["course_name"]) for c in courses or []
+                if isinstance(c, dict) and c.get("course_id") and c.get("course_name")}
+
     def lessons(self):
         data, _ = self.request("GET", "/api/v3/classroom/on-lesson")
         live = (data or {}).get("onLessonClassrooms")
@@ -146,13 +152,12 @@ class RainClient:
         names = {}
         if live:
             try:
-                courses, _ = self.request("GET", "/v/course_meta/learning_list/")
-                names = {str(c.get("course_id")): c.get("course_name") for c in courses or []
-                         if isinstance(c, dict)}
+                names = self.course_names()
             except (RainError, requests.RequestException):
                 pass  # A lesson ID remains usable if its optional course title cannot be loaded.
         return [Lesson(str(row["lessonId"]), str(row.get("courseName") or names.get(str(row.get("courseId")))
-                       or "课堂 " + str(row["lessonId"]))) for row in live if row.get("lessonId")]
+                       or "课堂 " + str(row["lessonId"])), str(row.get("courseId") or ""))
+                for row in live if row.get("lessonId")]
 
     def enter(self, lesson):
         data, headers = self.request("POST", "/api/v3/lesson/checkin", json={

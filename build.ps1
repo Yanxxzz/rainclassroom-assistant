@@ -7,5 +7,5 @@ $rcPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 & $rcPython -m unittest discover -s tests
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-& $rcPython -m PyInstaller --noconfirm --onefile --windowed --name RainDesk RainDesk.py
+& $rcPython -m PyInstaller --noconfirm --onefile --windowed --collect-binaries uiautomation --name RainDesk RainDesk.py
 exit $LASTEXITCODE

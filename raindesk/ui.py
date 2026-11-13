@@ -11,6 +11,7 @@ import requests
 
 from .client import RainClient, RainError
 from .desk import Desk
+from .group_panel import GroupPanel
 from .live import listen
 from .local import load_private, save_private
 from .question import TYPES
@@ -82,6 +83,9 @@ class App:
         ttk.Button(head, text="设置", command=self.settings).grid(row=0, column=2)
         self.auth_btn = ttk.Button(head, text="扫码登录", command=self.login)
         self.auth_btn.grid(row=0, column=3, padx=(8, 0))
+        self.group = GroupPanel(self)
+        self.group_btn = ttk.Button(head, text="监听微信群窗口", command=self.group.show)
+        self.group_btn.grid(row=0, column=4, padx=(8, 0))
         bar = ttk.Frame(root, padding=(20, 0, 20, 12))
         bar.grid(row=1, column=0, sticky="ew")
         ttk.Label(bar, text="当前课堂").pack(side="left")
@@ -186,11 +190,15 @@ class App:
                     callback(value)
         except queue.Empty:
             pass
+        self.group.drain()
         if not self.closing:
             self.root.after(75, self.pump)
 
     def failed(self, msg):
         self.session_busy = False
+        if self.group.entering:
+            self.group.status.set("目标课堂尚未进入。" + msg)
+            self.group.entering = None
         self.status.set(msg)
         self.controls()
 
@@ -233,6 +241,7 @@ class App:
         if self.client.uid:
             if not messagebox.askyesno("退出账号", "退出当前账号并清除本机登录状态？", parent=self.root):
                 return
+            self.group.stop()
             self.reset_class()
             self.client.forget()
             self.client = RainClient()
@@ -333,18 +342,35 @@ class App:
         i = self.course.current()
         if not 0 <= i < len(self.lessons):
             return
-        lesson = self.lessons[i]
-        self.reset_class()
+        self.group.cancel_pending()
+        self.join_lesson(self.lessons[i])
+
+    def join_lesson(self, lesson, *, watch_request=None):
         self.session_busy = True
         self.controls()
-        # The outgoing socket keeps its own client while its worker exits.
         prior = self.client
         client = RainClient()
         client.http.cookies.update(prior.http.cookies)
         client.uid, client.name = prior.uid, prior.name
-        self.client = client
         self.status.set("正在进入 " + lesson.name)
-        self.task(lambda: client.enter(lesson), lambda _: self.monitor())
+
+        def current():
+            return watch_request is None or (self.group.watch is not None and self.group.request == watch_request)
+
+        def enter():
+            if current():
+                client.enter(lesson)
+
+        def finish(_):
+            if not current() or client.lesson is None:
+                self.session_busy = False
+                self.controls()
+                return
+            self.reset_class()
+            self.client = client
+            self.monitor()
+
+        self.task(enter, finish)
 
     def monitor(self):
         self.session_busy = False
@@ -380,9 +406,12 @@ class App:
                 entry.question = payload
         elif kind == "connected":
             self.desk.online = True
+            self.group.connected()
             self.status.set(self.client.lesson.name + " · 已连接，自动监听老师发题")
         elif kind in ("ended", "offline"):
             self.desk.online = False
+            if self.group.entering:
+                self.group.status.set("目标课堂连接中断。" + str(payload))
             if kind == "ended":
                 self.desk.active = False
             self.status.set(payload)
@@ -648,6 +677,7 @@ class App:
         ttk.Button(block, text="保存设置", style="Send.TButton", command=store).pack(anchor="e")
 
     def close(self):
+        self.group.stop()
         self.stop.set()
         if self.desk:
             self.desk.active = False
