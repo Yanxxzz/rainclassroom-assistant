@@ -3,6 +3,8 @@ from html.parser import HTMLParser
 import re
 import time
 
+from .mathtext import plain_math
+
 
 TYPES = {1: "单选", 2: "多选", 3: "投票", 4: "填空", 5: "主观题", 6: "判断"}
 
@@ -95,14 +97,14 @@ class Question:
         if self.kind == 5:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError("请输入主观题答案。")
-            return value.strip()
+            return plain_math(value.strip())
         if self.kind == 4:
             parts = value.splitlines() if isinstance(value, str) else value
             if not isinstance(parts, (list, tuple)) or len(parts) != self.blanks:
                 raise ValueError("请按顺序填写 %d 个空，每行一个。" % self.blanks)
             if any(not isinstance(x, str) or not x.strip() for x in parts):
                 raise ValueError("每个空都需要填写。")
-            return [x.strip() for x in parts]
+            return [plain_math(x.strip()) for x in parts]
         if self.kind not in (1, 2, 3, 6):
             raise ValueError("暂不支持这个题型。")
         allowed = {k.casefold(): k for k, _ in self.options}

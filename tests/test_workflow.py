@@ -11,6 +11,7 @@ from raindesk.client import Lesson, RainClient, RainError
 from raindesk.desk import Desk
 from raindesk.live import LessonEvents
 from raindesk.question import Question
+from raindesk.providers import PROVIDERS, SolverError
 from raindesk.solver import make_prompt, solve
 
 
@@ -117,6 +118,47 @@ class ClassroomWorkflow(unittest.TestCase):
         client.lesson = Lesson("new-class", "下一节课")
         with self.assertRaises(ValueError):
             desk.confirm(e, approved)
+
+    def test_plain_math_drafts_and_explanations_for_all_providers(self):
+        q = exercise()
+        initial = {"items": [r"（1）\(\frac{a+b}{c+d}\)", r"（2）\binom{n}{k}"], "explanation": ""}
+        rewritten = {"items": ["（1）(a+b)/(c+d)", "（2）C(n,k)"], "explanation": r"由 \(x^{2}≥0\)。"}
+        for provider in PROVIDERS:
+            ask = "ask_gpt" if provider == "GPT" else "ask_external"
+            with self.subTest(provider=provider), patch("raindesk.solver." + ask,
+                                                       side_effect=[initial, rewritten]) as model:
+                draft, why = solve(q, {"provider": provider})
+                self.assertEqual(draft, "(a+b)/(c+d)；C(n,k)")
+                self.assertEqual(why, "由 x²≥0。")
+                prompts = [c.args[0 if provider == "GPT" else 1] for c in model.call_args_list]
+                self.assertEqual(len(prompts), 2)
+                self.assertIn("纯文本", prompts[0])
+                self.assertIn("上一次", prompts[1])
+                self.assertEqual(q.for_submission(draft, "示例署名"), "示例署名\n" + draft)
+
+    def test_plain_math_previews_keep_blanks_and_literal_text(self):
+        q = exercise(4)
+        self.assertEqual(q.for_submission("$x^2$\n$$a+b$$", "示例署名"), ["x²", "a+b"])
+        self.assertEqual(exercise().for_submission(r"\[(n−1)!n!\] 种", "示例"),
+                         "示例\n(n−1)!n! 种")
+        for plain in ("$5、$10", "a_name.txt", r"C:\temp\test", r"\\server\share\pi", r"\d+",
+                      "{x | x ≥ 0}", "x^(n+1)", "√(a/b)"):
+            with self.subTest(plain=plain):
+                self.assertEqual(exercise().normalize_answer(plain), plain)
+        self.assertEqual(exercise(1).for_submission("a", "示例"), ["A"])
+
+    def test_residual_markup_never_reaches_a_submission(self):
+        q = exercise()
+        for raw in (r"\frac{a+b}{c+d}", r"\begin{pmatrix}a&b\\c&d\end{pmatrix}",
+                    r"\hat{x}", r"n_{k+1}", r"\mathrm{kg}", r"\(x", "$x+1", "$ x^2 $",
+                    r"\\frac{1}{2}"):
+            with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, "纯文本"):
+                q.for_submission(raw, "示例")
+        invalid = {"items": ["42"], "explanation": r"由 \sum_{i=1}^n i。"}
+        with patch("raindesk.solver.ask_gpt", return_value=invalid) as model:
+            with self.assertRaisesRegex(SolverError, "纯文本"):
+                solve(q, {})
+            self.assertEqual(model.call_count, 2)
 
 
 if __name__ == "__main__":

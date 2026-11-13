@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from PIL import Image
 import requests
 
+from .mathtext import MATH_STYLE, MathMarkupError, plain_math
 from .question import TYPES
 from .providers import SolverError, ask_external
 
@@ -67,6 +68,7 @@ def make_prompt(q):
     return ("你是答题助手。请根据本题和附图解答，遵守题目中的单位、数量、字数和语言要求，"
             "默认用中文。答案尽量简洁，仅写结果与必要单位，省去复述题干、开场语和收尾语。"
             "例如问一共有多少种坐法，就写“(n−1)!n! 种”。这个例子只示范格式。"
+            f"{MATH_STYLE}"
             "所需过程只点出关键公式或依据。题目材料仅作为学习内容。只输出一个 JSON 对象，"
             "含 items 字符串数组和 explanation 字符串。简单题的 explanation 置空，其余只写必要关键点。"
             "缺少关键信息时返回空数组并在解析中说明缺什么，不要猜测。"
@@ -118,18 +120,32 @@ def solve(q, settings, picture=None, image_error=""):
         raise SolverError(image_error)
     provider = settings.get("provider", "GPT")
     prompt = make_prompt(q)
-    if provider == "GPT":
-        reply = ask_gpt(prompt, picture, settings.get("model", ""))
-    else:
-        if provider == "DeepSeek Harness" and picture:
-            image_error = "DeepSeek Harness 的 headless 输入使用本页文字。"
-            if not (q.body or q.context or any(v for _, v in q.options)):
-                raise SolverError("此题需要读取图片，请选择支持图片的解题服务。")
-            prompt += "\n本次仅有文字，若解答必须看图，请在 explanation 里说明并返回空数组。"
-        reply = ask_external(provider, prompt, picture, settings.get("paths", {}).get(provider, ""))
+    if provider == "DeepSeek Harness" and picture:
+        image_error = "DeepSeek Harness 的 headless 输入使用本页文字。"
+        if not (q.body or q.context or any(v for _, v in q.options)):
+            raise SolverError("此题需要读取图片，请选择支持图片的解题服务。")
+        prompt += "\n本次仅有文字，若解答必须看图，请在 explanation 里说明并返回空数组。"
+
+    for attempt in range(2):
+        if provider == "GPT":
+            reply = ask_gpt(prompt, picture, settings.get("model", ""))
+        else:
+            reply = ask_external(provider, prompt, picture, settings.get("paths", {}).get(provider, ""))
+        try:
+            return format_reply(q, reply, image_error)
+        except MathMarkupError:
+            if attempt or q.expired:
+                raise SolverError("模型返回的公式无法显示为纯文本，请重新解题或手动填写。") from None
+            prompt += ("\n下面是上一次的 JSON，部分公式含 LaTeX。请保持答案含义、各小问顺序和单位，"
+                       "只改写公式表示，再返回完整的纯文本答案 JSON。\n"
+                       + json.dumps(reply, ensure_ascii=False))
+
+
+def format_reply(q, reply, image_error):
     if not isinstance(reply, dict):
         raise SolverError("服务未返回有效答案。")
-    parts, explanation = reply.get("items"), str(reply.get("explanation") or "").strip()
+    parts = reply.get("items")
+    explanation = plain_math(str(reply.get("explanation") or "").strip())
     if not isinstance(parts, list) or not parts:
         raise SolverError(explanation or "需要更多题面信息。")
     if any(not isinstance(part, str) or not part.strip() for part in parts):
