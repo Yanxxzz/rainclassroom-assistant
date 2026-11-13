@@ -21,7 +21,7 @@ class Entry:
 
 
 class Desk:
-    """One account and one lesson per desk. Only confirm() can send a response."""
+    """Own drafts and submission receipts for one student in one lesson."""
     def __init__(self, client, settings, *, remember=True):
         self.client = client
         self.settings = settings
@@ -31,9 +31,23 @@ class Desk:
         self.remember = remember
         self.lock = threading.RLock()
         self.receipts = (load_private("receipts.dat") or {}) if remember else {}
+        self._auto_epoch = 0
 
     def receipt_key(self, q):
         return json.dumps([self.client.uid, q.lesson_id, q.id, int(q.opened)], ensure_ascii=False)
+
+    def set_auto_submit(self, enabled):
+        with self.lock:
+            self.settings["auto_submit"] = bool(enabled)
+            self._auto_epoch += 1
+
+    def auto_ticket(self, entry):
+        """An opt-in that applies to this new release and this unedited draft only."""
+        with self.lock:
+            if (self.settings.get("auto_submit") is True and not entry.question.from_history
+                    and self.active and self.online and entry.state == "解题中"):
+                return self._auto_epoch, entry.revision
+        return None
 
     def add(self, q):
         with self.lock:
@@ -82,13 +96,18 @@ class Desk:
             raise ValueError(entry.state)
         return q.for_submission(entry.text, self.settings.get("signature", ""))
 
-    def confirm(self, entry, approved_result):
+    def confirm(self, entry, approved_result, *, auto_ticket=None):
         with self.lock:
+            if auto_ticket is not None and (
+                    self.settings.get("auto_submit") is not True or
+                    auto_ticket != (self._auto_epoch, entry.revision) or entry.question.from_history or
+                    entry.state != "待确认"):
+                return False
             result = self.preview(entry)
             if result != approved_result:
                 raise ValueError("答案或署名已经改变，请重新确认。")
             # Persist uncertainty before dispatch so exiting mid-request cannot trigger a replay.
-            self.record(entry, "提交待核对", result=result)
+            self.record(entry, "提交待核对", result=result, mode="自动" if auto_ticket is not None else "手动")
             entry.state = "提交中"
         try:
             receipt = self.client.submit(entry.question, result)
@@ -104,3 +123,4 @@ class Desk:
         with self.lock:
             entry.state = "已提交"
             self.record(entry, "已提交", **receipt)
+        return True

@@ -59,9 +59,10 @@ class Question:
     context: str
     opened: float
     deadline: float | None
+    from_history: bool = False
 
     @classmethod
-    def from_slide(cls, lesson_id, pres, slide, release):
+    def from_slide(cls, lesson_id, pres, slide, release, *, from_history=False):
         p = slide["problem"]
         options = tuple((str(o["key"]), plain(o.get("value"))) for o in (p.get("options") or [])
                         if isinstance(o, dict) and o.get("key") is not None)
@@ -72,7 +73,7 @@ class Question:
         return cls(str(lesson_id), str(pres), str(p["problemId"]), int(p.get("problemType") or 0),
                    plain(p.get("body")), options, max(1, len(p.get("blanks") or [])),
                    int(p.get("pollingCount") or 1), slide.get("cover") or slide.get("coverAlt") or "",
-                   context, opened, opened + limit if limit > 0 else None)
+                   context, opened, opened + limit if limit > 0 else None, from_history)
 
     @property
     def key(self):

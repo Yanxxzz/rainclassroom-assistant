@@ -31,10 +31,12 @@ class LessonEvents:
         old = self.questions.get(pid)
         if old and (not opened or opened <= old.opened + 1 or not old.expired):
             return
-        self.pending[pid] = (pres, dict(data))
+        if history and pid in self.pending and not self.pending[pid][2]:
+            return  # An initial timeline can arrive while a real release is waiting for its slide.
+        self.pending[pid] = (pres, dict(data), history)
 
     def resolve(self):
-        for pid, (pres, data) in list(self.pending.items()):
+        for pid, (pres, data, history) in list(self.pending.items()):
             pres = pres or self.current
             if not pres:
                 continue
@@ -51,7 +53,7 @@ class LessonEvents:
                     self.emit("status", "已收到发题通知，正在重试读取题面。")
             if pid not in deck:
                 continue
-            q = Question.from_slide(self.client.lesson.id, pres, deck[pid], data)
+            q = Question.from_slide(self.client.lesson.id, pres, deck[pid], data, from_history=history)
             del self.pending[pid]
             if q.expired:
                 continue
@@ -79,9 +81,17 @@ class LessonEvents:
             data = msg.get("problem") or {}
             pid = str(data.get("prob") or data.get("problemId") or "")
             if not pid:
-                active = [key for key, q in self.questions.items() if not q.expired]
+                active = list(dict.fromkeys([key for key, q in self.questions.items() if not q.expired]
+                                            + list(self.pending)))
                 if len(active) == 1:
                     pid = active[0]
+            if pid in self.pending:
+                if op == "lockproblem":
+                    del self.pending[pid]
+                else:
+                    pending = self.pending[pid][1]
+                    if seconds(pending.get("limit")) > 0:
+                        pending["limit"] = seconds(pending["limit"]) + max(0, seconds(data.get("extend")))
             if pid in self.questions:
                 q = self.questions[pid]
                 if op == "lockproblem":

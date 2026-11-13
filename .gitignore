@@ -7,3 +7,6 @@ dist/
 .env
 *.dat
 *.log
+work/
+*.tmp
+*.local.json

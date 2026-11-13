@@ -91,6 +91,10 @@ class App:
         self.refresh_btn.pack(side="left")
         self.join_btn = ttk.Button(bar, text="进入并监听", command=self.join)
         self.join_btn.pack(side="left", padx=8)
+        self.auto_submit = tk.BooleanVar(master=root, value=self.config.get("auto_submit") is True)
+        self.auto_btn = ttk.Checkbutton(bar, text="允许自动提交答案", variable=self.auto_submit,
+                                        command=self.change_auto_submit)
+        self.auto_btn.pack(side="left", padx=(6, 0))
         self.lessons = []
 
         main = ttk.Panedwindow(root, orient="horizontal")
@@ -189,6 +193,19 @@ class App:
         self.session_busy = False
         self.status.set(msg)
         self.controls()
+
+    def change_auto_submit(self):
+        enabled = self.auto_submit.get()
+        if self.desk:
+            self.desk.set_auto_submit(enabled)
+        else:
+            self.config["auto_submit"] = enabled
+        try:
+            save_private("settings.dat", self.config)
+        except OSError:
+            self.status.set("本次切换已生效，无法保存到本机。")
+            return
+        self.status.set("新发布的题目将自动提交 AI 答案。" if enabled else "已切换为逐题确认提交。")
 
     def controls(self):
         signed = bool(self.client.uid)
@@ -356,7 +373,7 @@ class App:
                 self.select()
             self.list.see(row)
             if entry.state not in LOCKED:
-                self.start_solve(entry)
+                self.start_solve(entry, new_release=True)
         elif kind == "changed":
             entry = self.desk.entries.get(payload.key)
             if entry:
@@ -417,13 +434,15 @@ class App:
             e.state = "待确认"
             self.update_row(e)
 
-    def start_solve(self, entry):
+    def start_solve(self, entry, *, new_release=False):
         q = entry.question
         if q.expired or entry.state in LOCKED:
             return
         entry.state = "解题中"
         entry.revision += 1
         revision = entry.revision
+        desk = self.desk
+        ticket = desk.auto_ticket(entry) if new_release else None
         config = dict(self.config)
         old_pic = entry.picture
         self.update_row(entry)
@@ -447,6 +466,13 @@ class App:
                 return
             entry.text, entry.explanation, entry.state = answer, why, "待确认"
             self.update_row(entry, redraw=True)
+            if ticket is not None and self.auto_submit.get():
+                try:
+                    result = desk.preview(entry)
+                except ValueError as exc:
+                    self.status.set(str(exc))
+                else:
+                    self.dispatch(entry, result, ticket)
 
         def error(msg):
             if entry.revision == revision:
@@ -498,8 +524,8 @@ class App:
                 stamp = time.strftime("%H:%M:%S", time.localtime(r["time"]))
                 result = r["result"]
                 text = "\n".join(result) if isinstance(result, list) else result
-                info = "%s    HTTP %d    雨课堂返回码 %s\n%s\n\n%s" % (
-                    stamp, r["http"], r["code"], r.get("message") or "服务端已接收", text)
+                info = "%s    %s提交    HTTP %d    雨课堂返回码 %s\n%s\n\n%s" % (
+                    stamp, r.get("mode", "手动"), r["http"], r["code"], r.get("message") or "服务端已接收", text)
             else:
                 info = "早期版本仅保留了提交状态。完整作答可在微信雨课堂中查看。"
             messagebox.showinfo("提交回执", info, parent=self.root)
@@ -537,8 +563,7 @@ class App:
 
         def send():
             dismiss()
-            self.task(lambda: desk.confirm(entry, result),
-                      lambda _: self.sent(entry), lambda msg: self.submit_error(entry, msg))
+            self.dispatch(entry, result)
             self.send_btn.configure(state="disabled")
 
         ttk.Button(buttons, text="返回编辑", command=dismiss).pack(side="left")
@@ -546,14 +571,21 @@ class App:
         confirm.pack(side="right")
         win.protocol("WM_DELETE_WINDOW", dismiss)
 
+    def dispatch(self, entry, result, ticket=None):
+        desk = self.desk
+        self.task(lambda: desk.confirm(entry, result, auto_ticket=ticket),
+                  lambda sent: self.sent(entry) if sent else self.update_row(entry),
+                  lambda msg: self.submit_error(entry, msg, automatic=ticket is not None))
+
     def sent(self, entry):
         self.status.set("演练提交成功。" if self.demo else "雨课堂已接收你的答案。")
         self.update_row(entry, redraw=True)
 
-    def submit_error(self, entry, msg):
+    def submit_error(self, entry, msg, *, automatic=False):
         self.status.set(msg)
         self.update_row(entry, redraw=True)
-        messagebox.showinfo("提交状态", msg, parent=self.root)
+        if not automatic:
+            messagebox.showinfo("提交状态", msg, parent=self.root)
 
     def settings(self):
         win = tk.Toplevel(self.root)
