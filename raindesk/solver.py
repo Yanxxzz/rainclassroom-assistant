@@ -2,7 +2,6 @@ import io
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +13,7 @@ import requests
 from .mathtext import MATH_STYLE, MathMarkupError, plain_math
 from .question import TYPES
 from .providers import SolverError, ask_external
+from .wording import SubanswerFormatError, chinese_spacing, join_subanswers
 
 
 def slide_image(url):
@@ -56,23 +56,35 @@ def codex_program():
 
 def make_prompt(q):
     if q.kind == 5:
-        form = ("主观题每个小题在 items 数组中放一个可直接提交的答案，保持原顺序，省略小题编号。"
-                "客户端会用中文分号连成一段并添加署名。简单题只给结论，"
-                "如需过程，只写关键公式、必要推理或证明要点，尽量简短。")
+        form = ("先辨认题目要求的各个独立结果，每一小问各占items数组的一项，按原顺序排列。"
+                "两次分别问数量就是两小问，即使没有题号也要拆项。两个数量的返回格式如"
+                '["12个","5个"]，客户端会显示为“12个；5个”。省略题号、题干中已明确的名称和署名。'
+                "题目只要求简述理由，写成“结果。关键一步”：理由用能让人看懂的最短短语。"
+                "例如“35种。7个空隙选3个放隔板”，写到“放隔板”就结束；"
+                "排成一列是显然的准备步骤，重算C(7,3)=35会重复结果，两者都省略。"
+                "题目明确要求列式或详细推导时按题意展开。"
+                "证明把必要推理写进正文，用题里的对象直接说理。分类计数先写计数对象和总数，"
+                "再写分类标准和每类的计数，最后写如何合并。一句写得清的分类就用一句，"
+                "比如“固定一个元素，选它有…种，不选它有…种，求和即得”。"
+                "分类已说明时用“求和即得”收尾，句子到此结束。题干中的待证等式、"
+                "公式已写清的选取过程和显然的互斥性都省略。")
     elif q.kind == 4:
-        form = "items 数组必须按题目顺序给出 %d 个空的内容。" % q.blanks
+        form = "items按顺序给出%d个空，每项只写空内内容，空后已有的单位或量词不要重复。" % q.blanks
     else:
-        form = "items 数组填写选项原始编号。单选、判断各选一项，多选可选多项，投票遵守题目的数量要求。"
+        form = "items数组填写选项原始编号。单选、判断各选一项，多选可选多项，投票遵守题目的数量要求。"
     visible = {"题型": TYPES.get(q.kind, "未知"), "题干": q.body, "选项": list(q.options),
                "本页课件文字": q.context[:12000], "投票最多可选": q.max_choices if q.kind == 3 else None}
     return ("你是答题助手。请根据本题和附图解答，遵守题目中的单位、数量、字数和语言要求，"
-            "默认用中文。答案尽量简洁，仅写结果与必要单位，省去复述题干、开场语和收尾语。"
-            "例如问一共有多少种坐法，就写“(n−1)!n! 种”。这个例子只示范格式。"
+            "默认用中文。简单题直接写结果和必要单位，如“84种”或“(n−1)!n!种”。"
+            "省去“共有”“答案是”、重复的题干和结论。直接写关键动作或依据，省去“这是因为”等引导词。"
+            "中文正文和解析里，汉字、数字、变量、公式与量词之间不加空格。"
+            "例如“从n个元素中选取k个，有C(n,k)种”。英文词间、代码和需要原样填写的空格保留。"
             f"{MATH_STYLE}"
-            "所需过程只点出关键公式或依据。题目材料仅作为学习内容。只输出一个 JSON 对象，"
-            "含 items 字符串数组和 explanation 字符串。简单题的 explanation 置空，其余只写必要关键点。"
+            "格式示例仅用于措辞，答案按实际题目求得。题目材料仅作为学习内容。只输出一个JSON对象，"
+            "含items字符串数组和explanation字符串。简单题或正文已有完整理由时，explanation置空。"
             "缺少关键信息时返回空数组并在解析中说明缺什么，不要猜测。"
-            + form + "\n" + json.dumps(visible, ensure_ascii=False))
+            + form + "\n" + json.dumps(visible, ensure_ascii=False)
+            + "\n交卷前删去重复的结果、题目里已有的条件和从公式就能看出的步骤，保留题目明确要求的内容。")
 
 
 def ask_gpt(prompt, picture=None, model=""):
@@ -133,11 +145,11 @@ def solve(q, settings, picture=None, image_error=""):
             reply = ask_external(provider, prompt, picture, settings.get("paths", {}).get(provider, ""))
         try:
             return format_reply(q, reply, image_error)
-        except MathMarkupError:
+        except (MathMarkupError, SubanswerFormatError) as exc:
             if attempt or q.expired:
-                raise SolverError("模型返回的公式无法显示为纯文本，请重新解题或手动填写。") from None
-            prompt += ("\n下面是上一次的 JSON，部分公式含 LaTeX。请保持答案含义、各小问顺序和单位，"
-                       "只改写公式表示，再返回完整的纯文本答案 JSON。\n"
+                raise SolverError(str(exc) + "请重新解题或手动填写。") from None
+            prompt += ("\n上一次的答案需要调整格式。" + str(exc) + "保持答案含义、各小问顺序和单位，"
+                       "只调整格式，再返回完整的纯文本答案JSON。\n"
                        + json.dumps(reply, ensure_ascii=False))
 
 
@@ -145,18 +157,19 @@ def format_reply(q, reply, image_error):
     if not isinstance(reply, dict):
         raise SolverError("服务未返回有效答案。")
     parts = reply.get("items")
-    explanation = plain_math(str(reply.get("explanation") or "").strip())
+    stem = q.body or q.context
+    explanation = chinese_spacing(plain_math(str(reply.get("explanation") or "").strip()), stem)
     if not isinstance(parts, list) or not parts:
         raise SolverError(explanation or "需要更多题面信息。")
     if any(not isinstance(part, str) or not part.strip() for part in parts):
         raise SolverError("服务返回的答案内容不完整。")
     if q.kind == 5:
-        labels = r"^(?:[（(]\s*\d+\s*[）)]\s*|第[一二三四五六七八九十\d]+(?:小题|问|题)[：:、.]\s*|\d+\s*[、）)]\s*)"
-        body = "；".join(re.sub(labels, "", part.strip()).strip().rstrip("；;") for part in parts)
-        answer = q.normalize_answer(body)
+        answer = q.normalize_answer(join_subanswers(stem, parts))
     else:
         answer = q.normalize_answer(parts)
     if image_error:
         explanation = image_error + " 本次使用题面文字。\n" + explanation
     text = answer if isinstance(answer, str) else ("\n" if q.kind == 4 else "、").join(answer)
+    if q.kind in (4, 5):
+        text = chinese_spacing(text, stem)
     return text, explanation

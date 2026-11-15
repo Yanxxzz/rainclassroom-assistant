@@ -99,9 +99,9 @@ class ClassroomWorkflow(unittest.TestCase):
         suggestion = {"items": ["（1）24 小时", "（2）60 分钟"], "explanation": ""}
         with patch("raindesk.solver.ask_gpt", return_value=suggestion):
             draft, why = solve(q, {})
-        self.assertEqual(draft, "24 小时；60 分钟")
+        self.assertEqual(draft, "24小时；60分钟")
         self.assertEqual(why, "")
-        self.assertEqual(q.for_submission("测试000\n" + draft, "测试000"), "测试000\n24 小时；60 分钟")
+        self.assertEqual(q.for_submission("测试000\n" + draft, "测试000"), "测试000\n24小时；60分钟")
         self.assertNotIn("测试000", make_prompt(q))
 
     def test_expiry_and_session_changes_cancel_approval(self):
@@ -129,7 +129,7 @@ class ClassroomWorkflow(unittest.TestCase):
                                                        side_effect=[initial, rewritten]) as model:
                 draft, why = solve(q, {"provider": provider})
                 self.assertEqual(draft, "(a+b)/(c+d)；C(n,k)")
-                self.assertEqual(why, "由 x²≥0。")
+                self.assertEqual(why, "由x²≥0。")
                 prompts = [c.args[0 if provider == "GPT" else 1] for c in model.call_args_list]
                 self.assertEqual(len(prompts), 2)
                 self.assertIn("纯文本", prompts[0])

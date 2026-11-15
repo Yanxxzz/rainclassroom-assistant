@@ -22,7 +22,7 @@ class AutoSubmitWorkflow(unittest.TestCase):
         self.client.submit = Mock(return_value={"time": 1, "http": 200, "code": 0, "message": ""})
         self.store = patch("raindesk.ui.save_private").start()
         patch("raindesk.ui.load_private", return_value={"signature": "示例署名"}).start()
-        patch("raindesk.ui.solve", return_value=("24 小时；60 分钟", "")).start()
+        patch("raindesk.solver.ask_gpt", return_value={"items": ["24 小时", "60 分钟"], "explanation": ""}).start()
         self.addCleanup(patch.stopall)
         self.app = App(self.root, initial_client=self.client, demo=True)
         self.addCleanup(self.app.close)
@@ -71,7 +71,7 @@ class AutoSubmitWorkflow(unittest.TestCase):
         self.run_job()
         self.run_job()
         entry = self.app.entries[-1]
-        self.client.submit.assert_called_once_with(entry.question, "示例署名\n24 小时；60 分钟")
+        self.client.submit.assert_called_once_with(entry.question, "示例署名\n24小时；60分钟")
         self.assertEqual((entry.state, entry.receipt["mode"]), ("已提交", "自动"))
         self.assertIsNone(self.app.active_dialog)
         self.app.auto_btn.invoke()
