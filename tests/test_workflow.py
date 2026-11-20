@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 import time
 import unittest
+from dataclasses import replace
 from unittest.mock import Mock, patch
 
 from requests.structures import CaseInsensitiveDict
@@ -104,6 +105,62 @@ class ClassroomWorkflow(unittest.TestCase):
         self.assertEqual(q.for_submission("测试000\n" + draft, "测试000"), "测试000\n24小时；60分钟")
         self.assertNotIn("测试000", make_prompt(q))
 
+    def test_mark_survives_restart_and_restores_unsent_draft(self):
+        q, client, store = exercise(), classroom(), {}
+        with patch("raindesk.desk.load_private", side_effect=store.get), \
+                patch("raindesk.desk.save_private", side_effect=store.__setitem__):
+            desk = Desk(client, {"signature": "示例"})
+            original = desk.add(q)
+            original.text = "自编草稿"
+            desk.completed_elsewhere(original)
+            reopened = Desk(client, desk.settings)
+            entry = reopened.add(q)
+            self.assertEqual((entry.state, entry.text), ("已自行作答", "自编草稿"))
+            reopened.undo_completed_elsewhere(entry)
+            desk = Desk(client, desk.settings)
+            entry = desk.add(q)
+            self.assertEqual((entry.state, entry.text), ("待确认", "自编草稿"))
+            desk.online = True
+            approved, revision = desk.preview(entry), entry.revision
+            desk.completed_elsewhere(entry)
+            desk.undo_completed_elsewhere(entry)
+            with patch.object(client, "submit") as submit, self.assertRaisesRegex(ValueError, "重新确认"):
+                desk.confirm(entry, approved, expected_revision=revision)
+            submit.assert_not_called()
+            entry.question = q.close()
+            with self.assertRaisesRegex(ValueError, "已结束"):
+                desk.confirm(entry, approved)
+
+    def test_undo_older_mark_respects_previous_receipt(self):
+        q, client = exercise(), classroom()
+        uncertain = {"state": "已自行作答", "mode": "手动", "result": "原答案"}
+        for marker, expected in [("已自行作答", "待解题"), (uncertain, "提交待核对"),
+                                 (dict(uncertain, code=0), "已提交")]:
+            with self.subTest(expected=expected):
+                desk = Desk(client, {}, remember=False)
+                desk.receipts[desk.receipt_key(q)] = marker
+                entry = desk.add(q)
+                desk.undo_completed_elsewhere(entry)
+                self.assertEqual(entry.state, expected)
+
+    def test_steps_show_separately_for_structured_answers(self):
+        for kind, items, payload in [(1, ["A"], ["A"]), (2, ["B", "A"], ["A", "B"]),
+                                     (3, ["B"], ["B"]), (4, ["2", "3"], ["2", "3"]), (6, ["B"], ["B"])]:
+            q = exercise(kind)
+            for enabled in (False, True):
+                with self.subTest(kind=kind, enabled=enabled), patch("raindesk.solver.ask_gpt", return_value={
+                        "items": items, "explanation": "5−3=2"}) as model:
+                    draft, why = solve(q, {"include_steps": enabled})
+                    self.assertEqual(q.for_submission(draft, "示例"), payload)
+                    self.assertEqual(why, "5−3=2" if enabled else "")
+                    if enabled:
+                        self.assertIn("写在explanation中", model.call_args.args[0])
+        proof = replace(exercise(), body="证明下列等式。")
+        self.assertIn("最短论证", make_prompt(proof, False))
+        with patch("raindesk.solver.ask_gpt", return_value={"items": [], "explanation": "缺少等式"}):
+            with self.assertRaisesRegex(SolverError, "缺少等式"):
+                solve(proof, {})
+
     def test_expiry_and_session_changes_cancel_approval(self):
         client = classroom()
         desk = Desk(client, {"signature": "测试000"}, remember=False)
@@ -127,7 +184,7 @@ class ClassroomWorkflow(unittest.TestCase):
             ask = "ask_gpt" if provider == "GPT" else "ask_external"
             with self.subTest(provider=provider), patch("raindesk.solver." + ask,
                                                        side_effect=[initial, rewritten]) as model:
-                draft, why = solve(q, {"provider": provider})
+                draft, why = solve(q, {"provider": provider, "include_steps": True})
                 self.assertEqual(draft, "(a+b)/(c+d)；C(n,k)")
                 self.assertEqual(why, "由x²≥0。")
                 prompts = [c.args[0 if provider == "GPT" else 1] for c in model.call_args_list]

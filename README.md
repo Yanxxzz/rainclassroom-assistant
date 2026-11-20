@@ -11,11 +11,13 @@ RainDesk 是面向**标准版雨课堂随堂习题**的 Windows 自动答题程�
 3. 在「设置」中填写自己的姓名和学号。主观题第一行使用这段署名。填空题每行一空，选择和判断题按原始选项编号作答。
 4. 初次使用时，**「允许自动提交答案」默认关闭**。可以编辑草稿，点击「核对并提交」查看完整内容，再点击「确认提交」。
 5. 勾选开关后，后续实时发布的题目在 AI 生成有效答案时自动发送。关闭开关会取消尚未发出的自动提交。开关状态保存在本机。已有草稿、重连读到的历史题和手动重新生成的答案都留待核对。
-6. 成功后点击「查看提交回执」，可查看提交方式、时间、雨课堂业务状态码和完整答案。已在微信完成的题可标记「已在微信作答」。
+6. 成功后点击「查看提交回执」，可查看提交方式、时间、雨课堂业务状态码和完整答案。已在微信完成的题可点「已在微信作答」。若点错，在同一位置点「撤销微信作答标记」，即可恢复草稿。题目仍开放且尚无草稿时会重新解题。核对后点「核对并提交」即可发送。若之前的提交回执不明确，撤销后先在微信核对提交记录。
 
 ### AI 的答题风格
 
-简单题只写结果和必要单位，例如“84种”。一题有多个独立小问时，按原顺序用中文分号连接，省略题号，例如“125个；60个”。题目要求理由时，先给结果，再点出关键一步，例如“56种。8个空隙选3个放隔板”。证明题保留完整推理，分类计数写清计数对象、各类数量以及如何合并。
+「重新解题」旁的 **「给出解题过程」** 默认关闭。关闭时，简单题只写结果和必要单位，例如“84种”。题目明确要求证明、列式或说明理由时，保留必要论证。开启后，主观题答案附关键步骤，选择、判断、投票和填空题的步骤显示在「解析」中。设置会记住，下次生成答案时生效。要对当前草稿应用新选项，点「重新解题」。
+
+多个独立小问按原顺序用中文分号连接，省略题号，例如“125个；60个”。题目要求简述理由时，先给结果，再点出关键一步，例如“56种。8个空隙选3个放隔板”。分类计数写清计数对象、各类数量以及如何合并。
 
 公式用可直接复制的纯文本，如x²、(a+b)/(c+d)、C(n,k)。公式、数字与汉字之间不留空格，例如“从n个元素中选取k个”。填空只写空内内容，题面已带的单位省略。
 
@@ -32,9 +34,13 @@ RainDesk 是面向**标准版雨课堂随堂习题**的 Windows 自动答题程�
 
 默认使用本机已登录 ChatGPT 的 Codex CLI。需要能运行 codex exec 的近期版本。CLI 必须可从 PATH 找到，模型留空时使用其默认 GPT。账号按本机登录状态计量使用。
 
-也可在「设置」切换到 WorkBuddy 或 DeepSeek Harness，选择相应桌面程序或厂商 CLI。三个服务使用同一份作答要求。WorkBuddy 通过 CodeBuddy 的无头模式接收题目文字和图片。DeepSeek Harness 的 headless 接口接收题干、选项和同页课件文字，依赖图片的题建议使用 GPT 或支持视觉的 WorkBuddy 模型。每种服务需要在自己的客户端或 CLI 完成身份配置。
+在「设置 → 解题服务」也可选择 WorkBuddy 或 DeepSeek Harness。各服务使用同一份作答要求。
 
-[OpenAI 非交互调用文档](https://learn.chatgpt.com/docs/non-interactive-mode) · [WorkBuddy CLI 文档](https://www.workbuddy.cn/docs/cli/headless) · [DeepSeek Harness CLI 文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/cli-help.md)
+- **DeepSeek 官方 API**。选中「DeepSeek Harness」后，粘贴自己的 API 密钥，或点「从文件导入」选择单行密钥 `.txt` 或含 `DEEPSEEK_API_KEY=…` 的 `.env` 文件。程序路径留空，保存后即可使用官方 API 处理题目文字和图片。密钥按当前 Windows 用户加密保存，清空密钥并保存即可移除。可从 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 获取密钥。
+- **本机 DeepSeek Harness**。选择已安装的 Harness 程序或 CLI 路径即可沿用其配置。也可导入密钥供本次启动的 Harness 使用。若 CLI 已在 PATH 中且使用自己的密钥配置，程序路径和密钥均可留空。Harness 的 headless 接口接收题干、选项和同页课件文字。
+- **WorkBuddy**。选择程序或 CodeBuddy CLI，在其客户端或 CLI 中完成登录。无头模式可接收题目文字和图片。
+
+[OpenAI 非交互调用文档](https://learn.chatgpt.com/docs/non-interactive-mode) · [WorkBuddy CLI 文档](https://www.workbuddy.cn/docs/cli/headless) · [DeepSeek API 文档](https://api-docs.deepseek.com/) · [DeepSeek Harness 凭据配置](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/headless/README.zh.md)
 
 ## 数据与回执
 

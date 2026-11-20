@@ -15,7 +15,7 @@ from .group_panel import GroupPanel
 from .live import listen
 from .local import load_private, save_private
 from .question import TYPES
-from .providers import PROVIDERS
+from .providers import DEEPSEEK_KEY_HELP, PROVIDERS, parse_deepseek_key
 from .solver import SolverError, slide_image, solve
 
 
@@ -125,13 +125,20 @@ class App:
         self.pic_btn.pack(side="left")
         self.solve_btn = ttk.Button(actions, text="重新解题", command=self.retry)
         self.solve_btn.pack(side="left", padx=6)
+        self.include_steps = tk.BooleanVar(master=root, value=self.config.get("include_steps") is True)
+        self.steps_btn = ttk.Checkbutton(actions, text="给出解题过程", variable=self.include_steps,
+                                         command=self.change_steps)
+        self.steps_btn.pack(side="left", padx=4)
         self.done_btn = ttk.Button(actions, text="已在微信作答", command=self.mark_done)
         self.done_btn.pack(side="right")
         self.answer_label = tk.StringVar(value="答案")
         ttk.Label(right, textvariable=self.answer_label, font=(FONT, 11, "bold")).pack(anchor="w", pady=(5, 3))
         self.editor = self.textbox(right, 4, expand=True)
         self.editor.bind("<<Modified>>", self.edit)
-        ttk.Label(right, text="解析", font=(FONT, 11, "bold")).pack(anchor="w", pady=(8, 3))
+        explanation_bar = ttk.Frame(right)
+        explanation_bar.pack(fill="x", pady=(8, 3))
+        ttk.Label(explanation_bar, text="解析", font=(FONT, 11, "bold")).pack(side="left")
+        self.key_btn = ttk.Button(explanation_bar, text="导入 DeepSeek API 密钥…", command=self.settings)
         self.explanation = self.textbox(right, 3, readonly=True)
         end = ttk.Frame(right)
         end.pack(fill="x", pady=(10, 3))
@@ -215,6 +222,17 @@ class App:
             return
         self.status.set("新发布的题目将自动提交 AI 答案。" if enabled else "已切换为逐题确认提交。")
 
+    def change_steps(self):
+        enabled = self.include_steps.get()
+        self.config["include_steps"] = enabled
+        try:
+            save_private("settings.dat", self.config)
+        except OSError:
+            self.status.set("过程选项本次已生效，无法保存到本机。")
+            return
+        mode = "下次解题会给出关键步骤。" if enabled else "下次解题仅保留结果和题目要求的必要说明。"
+        self.status.set(mode + "当前草稿可点「重新解题」。")
+
     def controls(self):
         signed = bool(self.client.uid)
         can_switch = not self.session_busy and not any(e.state == "提交中" for e in self.entries)
@@ -224,7 +242,13 @@ class App:
         entry = self.current
         writable = bool(entry and self.desk and self.desk.active and not entry.question.expired and entry.state not in LOCKED)
         self.solve_btn.configure(state="normal" if writable and entry.state != "解题中" else "disabled")
-        self.done_btn.configure(state="normal" if entry and entry.state not in ("提交中", "已提交", "已自行作答") else "disabled")
+        self.done_btn.configure(text="撤销微信作答标记" if entry and entry.state == "已自行作答" else "已在微信作答",
+                                state="normal" if entry and entry.state not in ("提交中", "已提交") else "disabled")
+        if entry and entry.explanation == DEEPSEEK_KEY_HELP and self.config.get("provider") == "DeepSeek Harness":
+            if not self.key_btn.winfo_manager():
+                self.key_btn.pack(side="right")
+        else:
+            self.key_btn.pack_forget()
         self.pic_btn.configure(state="normal" if entry and entry.picture else "disabled")
         self.send_btn.configure(state="normal" if (writable and self.desk.online and entry.text.strip())
                                 or (entry and entry.state in ("提交待核对", "已提交")) else "disabled")
@@ -398,8 +422,8 @@ class App:
                 self.list.selection_set(row)
                 self.select()
             self.list.see(row)
-            if entry.state not in LOCKED:
-                self.start_solve(entry, new_release=True)
+            if entry.state == "待解题":
+                self.start_solve(entry, new_release=entry.receipt is None)
         elif kind == "changed":
             entry = self.desk.entries.get(payload.key)
             if entry:
@@ -539,9 +563,20 @@ class App:
         ttk.Label(win, image=win.photo).pack()
 
     def mark_done(self):
-        if self.current:
-            self.desk.completed_elsewhere(self.current)
-            self.update_row(self.current, redraw=True)
+        entry = self.current
+        if not entry or not self.desk:
+            return
+        try:
+            if entry.state == "已自行作答":
+                self.desk.undo_completed_elsewhere(entry)
+                self.status.set("已撤销微信作答标记。")
+                if entry.state == "待解题" and self.desk.active and self.desk.online and not entry.question.expired:
+                    self.start_solve(entry)
+            else:
+                self.desk.completed_elsewhere(entry)
+        except OSError:
+            self.status.set("无法保存微信作答标记，请重试。")
+        self.update_row(entry, redraw=True)
 
     def review(self):
         entry, desk = self.current, self.desk
@@ -570,6 +605,7 @@ class App:
         except ValueError as exc:
             messagebox.showinfo("核对答案", str(exc), parent=self.root)
             return
+        revision = entry.revision
         win = tk.Toplevel(self.root)
         win.title("确认这道题的答案")
         win.transient(self.root)
@@ -592,7 +628,7 @@ class App:
 
         def send():
             dismiss()
-            self.dispatch(entry, result)
+            self.dispatch(entry, result, revision=revision)
             self.send_btn.configure(state="disabled")
 
         ttk.Button(buttons, text="返回编辑", command=dismiss).pack(side="left")
@@ -600,9 +636,9 @@ class App:
         confirm.pack(side="right")
         win.protocol("WM_DELETE_WINDOW", dismiss)
 
-    def dispatch(self, entry, result, ticket=None):
+    def dispatch(self, entry, result, ticket=None, *, revision=None):
         desk = self.desk
-        self.task(lambda: desk.confirm(entry, result, auto_ticket=ticket),
+        self.task(lambda: desk.confirm(entry, result, auto_ticket=ticket, expected_revision=revision),
                   lambda sent: self.sent(entry) if sent else self.update_row(entry),
                   lambda msg: self.submit_error(entry, msg, automatic=ticket is not None))
 
@@ -647,6 +683,33 @@ class App:
             if path:
                 path_value.set(path)
         choose = ttk.Button(helper, text="浏览…", command=browse)
+        key_box = ttk.Frame(block)
+        ttk.Label(key_box, text="DeepSeek API 密钥").pack(anchor="w")
+        key_value = tk.StringVar(master=win, value=self.config.get("deepseek_api_key", ""))
+        key_row = ttk.Frame(key_box)
+        key_row.pack(fill="x", pady=4)
+        key_entry = ttk.Entry(key_row, textvariable=key_value, show="*", exportselection=False)
+        key_entry.pack(side="left", fill="x", expand=True)
+        key_hint = tk.StringVar(master=win, value="粘贴或从文件导入 API 密钥。只用官方 API 时，程序路径留空。已配置的 Harness 可以沿用原密钥。")
+        ttk.Label(key_box, textvariable=key_hint, wraplength=365, style="Muted.TLabel").pack(anchor="w")
+
+        def import_key():
+            filename = filedialog.askopenfilename(parent=win, title="导入 DeepSeek API 密钥",
+                                                  filetypes=[("密钥文本", "*.txt *.env .env"), ("所有文件", "*.*")])
+            if not filename:
+                return
+            try:
+                with open(filename, encoding="utf-8-sig") as file:
+                    key = parse_deepseek_key(file.read())
+            except (OSError, ValueError):
+                key_hint.set("无法导入。请选择 UTF-8 单行密钥文本或包含 DEEPSEEK_API_KEY 的 .env 文件。")
+                return
+            key_value.set(key)
+            key_hint.set("已读取密钥，点击「保存设置」生效。")
+
+        ttk.Button(key_row, text="从文件导入…", command=import_key).pack(side="right", padx=(5, 0))
+        footer = ttk.Frame(block)
+        footer.pack(fill="x")
         selected = [None]
         def switch(_event=None):
             if selected[0] and selected[0] != "GPT":
@@ -662,6 +725,12 @@ class App:
                 field.pack(side="left", expand=True, fill="x")
                 choose.pack(side="right", padx=4)
                 path_value.set(paths.get(provider.get(), ""))
+            if provider.get() == "DeepSeek Harness":
+                key_box.pack(fill="x", pady=(0, 12), before=footer)
+                if not key_value.get():
+                    key_entry.focus_set()
+            else:
+                key_box.pack_forget()
         provider.bind("<<ComboboxSelected>>", switch)
         switch()
 
@@ -669,12 +738,30 @@ class App:
             if provider.get() != "GPT":
                 paths[provider.get()] = path_value.get().strip()
             paths.pop("GPT", None)
-            self.config.update(signature=signature.get().strip(), model=model.get().strip(),
-                               provider=provider.get(), paths=paths)
-            save_private("settings.dat", self.config)
+            updated = dict(self.config, signature=signature.get().strip(), model=model.get().strip(),
+                           provider=provider.get(), paths=paths)
+            if provider.get() == "DeepSeek Harness":
+                try:
+                    if key_value.get().strip():
+                        updated["deepseek_api_key"] = parse_deepseek_key(key_value.get())
+                    else:
+                        updated.pop("deepseek_api_key", None)
+                except ValueError as exc:
+                    key_hint.set(str(exc))
+                    key_entry.focus_set()
+                    return
+            try:
+                save_private("settings.dat", updated)
+            except OSError:
+                messagebox.showerror("答题设置", "无法在本机加密保存设置，请重试。", parent=win)
+                return
+            self.config.update(updated)
+            if "deepseek_api_key" not in updated:
+                self.config.pop("deepseek_api_key", None)
             win.destroy()
+            self.controls()
             self.status.set("设置已保存。")
-        ttk.Button(block, text="保存设置", style="Send.TButton", command=store).pack(anchor="e")
+        ttk.Button(footer, text="保存设置", style="Send.TButton", command=store).pack(anchor="e")
 
     def close(self):
         self.group.stop()

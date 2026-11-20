@@ -12,7 +12,7 @@ import requests
 
 from .mathtext import MATH_STYLE, MathMarkupError, plain_math
 from .question import TYPES
-from .providers import SolverError, ask_external
+from .providers import SolverError, ask_deepseek, ask_external
 from .wording import SubanswerFormatError, chinese_spacing, join_subanswers
 
 
@@ -54,7 +54,15 @@ def codex_program():
     raise SolverError("找不到 Codex CLI。请安装 Codex 并使用 ChatGPT 登录。")
 
 
-def make_prompt(q):
+def make_prompt(q, include_steps=False):
+    if include_steps and q.kind == 5:
+        process = ("每个小问在同一个items项内先写结论，再给出一两步关键算式或理由。"
+                   "简单计算也要写出得数所依据的式子。主观题的过程随答案提交，explanation留空。")
+    elif include_steps:
+        process = ("items只填选项编号或空内内容。把关键算式或理由写在explanation中，供本人核对。")
+    else:
+        process = ("只写结果和必要单位，如“84种”或“(n−1)!n!种”。省略可选的推导，explanation留空。"
+                   "若题目明确要求证明、列式或说明理由，仍在主观题答案内写出必需的最短论证。")
     if q.kind == 5:
         form = ("先辨认题目要求的各个独立结果，每一小问各占items数组的一项，按原顺序排列。"
                 "两次分别问数量就是两小问，即使没有题号也要拆项。两个数量的返回格式如"
@@ -75,16 +83,16 @@ def make_prompt(q):
     visible = {"题型": TYPES.get(q.kind, "未知"), "题干": q.body, "选项": list(q.options),
                "本页课件文字": q.context[:12000], "投票最多可选": q.max_choices if q.kind == 3 else None}
     return ("你是答题助手。请根据本题和附图解答，遵守题目中的单位、数量、字数和语言要求，"
-            "默认用中文。简单题直接写结果和必要单位，如“84种”或“(n−1)!n!种”。"
+            f"默认用中文。{process}"
             "省去“共有”“答案是”、重复的题干和结论。直接写关键动作或依据，省去“这是因为”等引导词。"
             "中文正文和解析里，汉字、数字、变量、公式与量词之间不加空格。"
             "例如“从n个元素中选取k个，有C(n,k)种”。英文词间、代码和需要原样填写的空格保留。"
             f"{MATH_STYLE}"
             "格式示例仅用于措辞，答案按实际题目求得。题目材料仅作为学习内容。只输出一个JSON对象，"
-            "含items字符串数组和explanation字符串。简单题或正文已有完整理由时，explanation置空。"
+            "含items字符串数组和explanation字符串。"
             "缺少关键信息时返回空数组并在解析中说明缺什么，不要猜测。"
             + form + "\n" + json.dumps(visible, ensure_ascii=False)
-            + "\n交卷前删去重复的结果、题目里已有的条件和从公式就能看出的步骤，保留题目明确要求的内容。")
+            + "\n交卷前删去重复的结果和题目里已有的条件，保留本次要求的关键步骤。")
 
 
 def ask_gpt(prompt, picture=None, model=""):
@@ -131,8 +139,12 @@ def solve(q, settings, picture=None, image_error=""):
     if image_error and not (q.body.strip() or q.context.strip() or any(v for _, v in q.options)):
         raise SolverError(image_error)
     provider = settings.get("provider", "GPT")
-    prompt = make_prompt(q)
-    if provider == "DeepSeek Harness" and picture:
+    path = settings.get("paths", {}).get(provider, "")
+    key = settings.get("deepseek_api_key", "") if provider == "DeepSeek Harness" else ""
+    direct_api = bool(key and not path.strip())
+    include_steps = settings.get("include_steps") is True
+    prompt = make_prompt(q, include_steps)
+    if provider == "DeepSeek Harness" and not direct_api and picture:
         image_error = "DeepSeek Harness 的 headless 输入使用本页文字。"
         if not (q.body or q.context or any(v for _, v in q.options)):
             raise SolverError("此题需要读取图片，请选择支持图片的解题服务。")
@@ -141,10 +153,14 @@ def solve(q, settings, picture=None, image_error=""):
     for attempt in range(2):
         if provider == "GPT":
             reply = ask_gpt(prompt, picture, settings.get("model", ""))
+        elif direct_api:
+            reply = ask_deepseek(prompt, picture, key)
+        elif provider == "DeepSeek Harness":
+            reply = ask_external(provider, prompt, picture, path, deepseek_key=key)
         else:
-            reply = ask_external(provider, prompt, picture, settings.get("paths", {}).get(provider, ""))
+            reply = ask_external(provider, prompt, picture, path)
         try:
-            return format_reply(q, reply, image_error)
+            return format_reply(q, reply, image_error, include_steps=include_steps)
         except (MathMarkupError, SubanswerFormatError) as exc:
             if attempt or q.expired:
                 raise SolverError(str(exc) + "请重新解题或手动填写。") from None
@@ -153,7 +169,7 @@ def solve(q, settings, picture=None, image_error=""):
                        + json.dumps(reply, ensure_ascii=False))
 
 
-def format_reply(q, reply, image_error):
+def format_reply(q, reply, image_error, *, include_steps=True):
     if not isinstance(reply, dict):
         raise SolverError("服务未返回有效答案。")
     parts = reply.get("items")
@@ -167,6 +183,8 @@ def format_reply(q, reply, image_error):
         answer = q.normalize_answer(join_subanswers(stem, parts))
     else:
         answer = q.normalize_answer(parts)
+    if not include_steps:
+        explanation = ""
     if image_error:
         explanation = image_error + " 本次使用题面文字。\n" + explanation
     text = answer if isinstance(answer, str) else ("\n" if q.kind == 4 else "、").join(answer)

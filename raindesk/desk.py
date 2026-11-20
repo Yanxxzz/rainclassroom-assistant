@@ -60,11 +60,13 @@ class Desk:
             remembered = self.receipts.get(self.receipt_key(q))
             if isinstance(remembered, dict):
                 entry.receipt = remembered
-                value = remembered.get("result")
+                value = remembered.get("draft", remembered.get("result"))
                 if isinstance(value, list):
                     entry.text = ("\n" if q.kind == 4 else "、").join(str(x) for x in value)
                 elif isinstance(value, str):
                     entry.text = value
+                if "draft" in remembered and remembered.get("state") == "待确认":
+                    entry.state = "待确认"
                 remembered = remembered.get("state")
             if remembered in ("已提交", "提交待核对", "已自行作答"):
                 entry.state = remembered
@@ -72,20 +74,45 @@ class Desk:
             return entry
 
     def record(self, entry, state, **details):
-        key = self.receipt_key(entry.question)
-        current = self.receipts.get(key)
-        record = {**(current if isinstance(current, dict) else {}), **details, "state": state}
-        self.receipts[key] = entry.receipt = record
-        if self.remember:
-            save_private("receipts.dat", dict(list(self.receipts.items())[-500:]))
+        with self.lock:
+            key = self.receipt_key(entry.question)
+            updated = self.receipts.copy()
+            current = updated.pop(key, None)
+            record = {**(current if isinstance(current, dict) else {}), **details, "state": state}
+            if state != "已自行作答":
+                record.pop("before_mark", None)
+            if state not in ("已自行作答", "待确认", "待解题"):
+                record.pop("draft", None)
+            updated[key] = record
+            if self.remember:
+                updated = dict(list(updated.items())[-500:])
+                save_private("receipts.dat", updated)
+            self.receipts, entry.receipt = updated, record
 
     def completed_elsewhere(self, entry):
         with self.lock:
-            if entry.state == "提交中":
+            if self.entries.get(entry.question.key) is not entry or entry.state in ("提交中", "已提交", "已自行作答"):
                 return
+            self.record(entry, "已自行作答", before_mark=entry.state, draft=entry.text)
             entry.revision += 1
             entry.state = "已自行作答"
-            self.record(entry, entry.state)
+
+    def undo_completed_elsewhere(self, entry):
+        with self.lock:
+            if self.entries.get(entry.question.key) is not entry or entry.state != "已自行作答":
+                return
+            marker = entry.receipt or {}
+            previous = marker.get("before_mark")
+            if marker.get("code") == 0:
+                state = "已提交"
+            elif previous == "提交待核对" or (previous is None and "mode" in marker and "result" in marker):
+                # Older markers can retain a dispatched answer without its acknowledgement.
+                state = "提交待核对"
+            else:
+                state = "待确认" if entry.text.strip() else "待解题"
+            self.record(entry, state, draft=entry.text)
+            entry.revision += 1
+            entry.state = state
 
     def preview(self, entry):
         q = entry.question
@@ -96,8 +123,10 @@ class Desk:
             raise ValueError(entry.state)
         return q.for_submission(entry.text, self.settings.get("signature", ""))
 
-    def confirm(self, entry, approved_result, *, auto_ticket=None):
+    def confirm(self, entry, approved_result, *, auto_ticket=None, expected_revision=None):
         with self.lock:
+            if expected_revision is not None and entry.revision != expected_revision:
+                raise ValueError("作答状态或草稿已改变，请重新确认。")
             if auto_ticket is not None and (
                     self.settings.get("auto_submit") is not True or
                     auto_ticket != (self._auto_epoch, entry.revision) or entry.question.from_history or

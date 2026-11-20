@@ -1,4 +1,4 @@
-"""Noninteractive integrations with the user's installed desktop AI tools."""
+"""Noninteractive integrations with DeepSeek and desktop AI tools."""
 import base64
 import json
 import os
@@ -8,18 +8,36 @@ import shutil
 import subprocess
 import tempfile
 
+import requests
+
 
 PROVIDERS = ("GPT", "WorkBuddy", "DeepSeek Harness")
+DEEPSEEK_KEY_HELP = "请在设置中导入或更新 DeepSeek API 密钥，保存后点「重新解题」。"
 
 
 class SolverError(Exception):
     pass
 
 
+def parse_deepseek_key(text):
+    """Accept a pasted key, a single-key text file or the named value in a .env file."""
+    value = text.lstrip("\ufeff").strip()
+    matches = re.findall(r"(?m)^[ \t]*(?:export[ \t]+)?DEEPSEEK_API_KEY[ \t]*=[ \t]*(.*)$", value)
+    if len(matches) == 1:
+        value = re.split(r"[ \t]+#", matches[0], maxsplit=1)[0].strip()
+        if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
+            value = value[1:-1]
+    if not re.fullmatch(r"[A-Za-z0-9._~+/\-]+={0,2}", value):
+        raise ValueError("请粘贴单行 API 密钥，或导入含 DEEPSEEK_API_KEY 的文件。")
+    return value
+
+
 def _launcher(provider, configured):
     name = "codebuddy" if provider == "WorkBuddy" else "dsh"
     raw = configured.strip().strip('"') or shutil.which(name + ".exe") or shutil.which(name + ".cmd")
     if not raw:
+        if provider == "DeepSeek Harness":
+            raise SolverError(DEEPSEEK_KEY_HELP)
         raise SolverError("请在设置中选择 %s 的程序或 CLI 路径。" % provider)
     path = Path(raw).expanduser().absolute()
     if not path.is_file():
@@ -59,7 +77,36 @@ def _answer_object(text):
     return obj
 
 
-def ask_external(provider, prompt, picture, configured=""):
+def ask_deepseek(prompt, picture, key):
+    content = prompt
+    if picture:
+        encoded = base64.b64encode(picture).decode("ascii")
+        content = [{"type": "text", "text": prompt},
+                   {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + encoded}}]
+    try:
+        response = requests.post("https://api.deepseek.com/chat/completions",
+                                 headers={"Authorization": "Bearer " + key},
+                                 json={"model": "deepseek-flash", "messages": [{"role": "user", "content": content}],
+                                       "response_format": {"type": "json_object"}},
+                                 allow_redirects=False, timeout=(10, 140))
+    except requests.RequestException:
+        raise SolverError("无法连接 DeepSeek API，请检查网络后重试。") from None
+    if response.status_code in (401, 403):
+        raise SolverError(DEEPSEEK_KEY_HELP)
+    if response.status_code == 402:
+        raise SolverError("DeepSeek API 余额不足，请检查账户余额。")
+    if response.status_code == 429:
+        raise SolverError("DeepSeek API 请求过于频繁，请稍后重新解题。")
+    if response.status_code != 200:
+        raise SolverError(f"DeepSeek API 请求失败（HTTP {response.status_code}）。")
+    try:
+        answer = response.json()["choices"][0]["message"]["content"]
+    except (ValueError, IndexError, KeyError, TypeError):
+        raise SolverError("DeepSeek API 未返回可读取的答案。") from None
+    return _answer_object(answer)
+
+
+def ask_external(provider, prompt, picture, configured="", *, deepseek_key=""):
     wb = provider == "WorkBuddy"
     if provider not in PROVIDERS[1:]:
         raise SolverError("未知解题服务。")
@@ -77,9 +124,10 @@ def ask_external(provider, prompt, picture, configured=""):
         else:
             stdin = prompt
             args = ["headless", "-"]
+        env = {**os.environ, "DEEPSEEK_API_KEY": deepseek_key} if not wb and deepseek_key else None
         try:
             result = subprocess.run(program + args, cwd=directory, input=stdin.encode("utf-8"),
-                                    capture_output=True, timeout=150, check=False,
+                                    capture_output=True, timeout=150, check=False, env=env,
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except subprocess.TimeoutExpired as exc:
             raise SolverError(provider + " 未在时限内返回答案。") from exc
@@ -89,6 +137,8 @@ def ask_external(provider, prompt, picture, configured=""):
         diag = (result.stderr.decode("utf-8", errors="replace") + output).casefold()
         if result.returncode:
             if any(k in diag for k in ("missing_credential", "api key", "api_key", "unauthorized", "authentication", "login", "登录", "401")):
+                if not wb:
+                    raise SolverError(DEEPSEEK_KEY_HELP)
                 raise SolverError(provider + " 需要先在它自己的 CLI 中完成登录或配置 API 密钥。")
             raise SolverError(provider + " 调用失败，请检查其 CLI 配置和网络。")
         if wb:
