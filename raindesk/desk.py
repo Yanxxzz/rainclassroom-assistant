@@ -1,12 +1,29 @@
 from dataclasses import dataclass
 import json
 import threading
+import time
 
 import requests
 
 from .client import RainError, UnclearReceipt
 from .local import load_private, save_private
 from .question import Question
+
+
+def submit_delay(settings):
+    seconds = settings.get("submit_delay_seconds", 10)
+    return seconds if type(seconds) is int and seconds >= 0 else 10
+
+
+@dataclass
+class PendingSubmission:
+    result: str | list[str]
+    ticket: tuple[int, int]
+    ready_at: float
+    queued: bool = False
+
+    def seconds_left(self, delay):
+        return max(0, delay - int(time.monotonic() - self.ready_at))
 
 
 @dataclass
@@ -18,6 +35,7 @@ class Entry:
     revision: int = 0
     picture: bytes | None = None
     receipt: dict | None = None
+    pending: PendingSubmission | None = None
 
 
 class Desk:
@@ -39,7 +57,13 @@ class Desk:
     def set_auto_submit(self, enabled):
         with self.lock:
             self.settings["auto_submit"] = bool(enabled)
+            self.cancel_auto_submissions()
+
+    def cancel_auto_submissions(self):
+        with self.lock:
             self._auto_epoch += 1
+            for entry in self.entries.values():
+                entry.pending = None
 
     def auto_ticket(self, entry):
         """An opt-in that applies to this new release and this unedited draft only."""
@@ -47,6 +71,29 @@ class Desk:
             if (self.settings.get("auto_submit") is True and not entry.question.from_history
                     and self.active and self.online and entry.state == "解题中"):
                 return self._auto_epoch, entry.revision
+        return None
+
+    def _can_auto_submit(self, entry, ticket):
+        return (self.settings.get("auto_submit") is True and self.active and self.online
+                and self.entries.get(entry.question.key) is entry and not entry.question.from_history
+                and not entry.question.expired and entry.state == "待确认"
+                and ticket == (self._auto_epoch, entry.revision))
+
+    def schedule_auto(self, entry, ticket):
+        with self.lock:
+            if self._can_auto_submit(entry, ticket):
+                entry.pending = PendingSubmission(self.preview(entry), ticket, time.monotonic())
+
+    def due_auto(self, entry):
+        with self.lock:
+            pending = entry.pending
+            if pending is None:
+                return None
+            if not self._can_auto_submit(entry, pending.ticket):
+                entry.pending = None
+            elif not pending.queued and pending.seconds_left(submit_delay(self.settings)) == 0:
+                pending.queued = True
+                return pending
         return None
 
     def add(self, q):
@@ -94,6 +141,7 @@ class Desk:
             if self.entries.get(entry.question.key) is not entry or entry.state in ("提交中", "已提交", "已自行作答"):
                 return
             self.record(entry, "已自行作答", before_mark=entry.state, draft=entry.text)
+            entry.pending = None
             entry.revision += 1
             entry.state = "已自行作答"
 
@@ -127,11 +175,15 @@ class Desk:
         with self.lock:
             if expected_revision is not None and entry.revision != expected_revision:
                 raise ValueError("作答状态或草稿已改变，请重新确认。")
-            if auto_ticket is not None and (
-                    self.settings.get("auto_submit") is not True or
-                    auto_ticket != (self._auto_epoch, entry.revision) or entry.question.from_history or
-                    entry.state != "待确认"):
-                return False
+            if auto_ticket is not None:
+                pending = entry.pending
+                if not pending or pending.ticket != auto_ticket or not self._can_auto_submit(entry, auto_ticket):
+                    return False
+                if pending.seconds_left(submit_delay(self.settings)):
+                    # The user lengthened the delay between dispatch and execution.
+                    pending.queued = False
+                    return False
+            entry.pending = None
             result = self.preview(entry)
             if result != approved_result:
                 raise ValueError("答案或署名已经改变，请重新确认。")

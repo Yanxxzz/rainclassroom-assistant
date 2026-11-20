@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from raindesk.client import Lesson, RainClient
+from raindesk.desk import submit_delay
 from raindesk.live import LessonEvents
 from raindesk.providers import SolverError
 from raindesk.ui import App
@@ -36,7 +37,7 @@ class AutoSubmitWorkflow(unittest.TestCase):
         self.client.presentation = Mock(side_effect=self.presentation)
         self.client.submit = Mock(return_value={"time": 1, "http": 200, "code": 0, "message": ""})
         self.store = patch("raindesk.ui.save_private").start()
-        patch("raindesk.ui.load_private", return_value={"signature": "示例署名"}).start()
+        patch("raindesk.ui.load_private", return_value={"signature": "示例署名", "submit_delay_seconds": 0}).start()
         patch("raindesk.solver.ask_gpt", return_value={"items": ["24 小时", "60 分钟"], "explanation": ""}).start()
         self.addCleanup(patch.stopall)
         self.app = App(self.root, initial_client=self.client, demo=True)
@@ -70,6 +71,111 @@ class AutoSubmitWorkflow(unittest.TestCase):
             error(str(exc))
         else:
             done(result)
+
+    def select_delay(self, label):
+        self.app.delay_box.set(label)
+        self.app.delay_box.event_generate("<<ComboboxSelected>>")
+
+    def test_presets_custom_seconds_and_cancel(self):
+        self.assertEqual(submit_delay({}), 10)
+        self.assertEqual(submit_delay({"submit_delay_seconds": -1}), 10)
+        self.app.config.pop("submit_delay_seconds")
+        self.app.show_delay()
+        self.assertEqual(self.app.delay_box.get(), "10秒")
+        for label, seconds in [("30秒", 30), ("1分钟", 60), ("立即", 0), ("10秒", 10)]:
+            self.select_delay(label)
+            self.assertEqual(self.app.config["submit_delay_seconds"], seconds)
+        with patch("raindesk.ui.simpledialog.askinteger", side_effect=[75, None]):
+            self.select_delay("自定义…")
+            self.select_delay("自定义…")
+        self.assertEqual((self.app.delay_box.get(), self.app.config["submit_delay_seconds"]), ("75秒", 75))
+        self.store.assert_called_with("settings.dat", self.app.config)
+
+    def test_independent_countdowns_start_when_each_draft_is_ready(self):
+        self.select_delay("10秒")
+        self.app.auto_btn.invoke()
+        with patch("raindesk.desk.time.monotonic", return_value=100) as clock:
+            self.release(0)
+            clock.return_value = 120
+            self.run_job()
+            self.assertEqual(self.app.review_state.get(), "10秒后自动提交")
+            self.release(1)
+            clock.return_value = 125
+            self.run_job()
+            clock.return_value = 129.999
+            self.app.process_submissions()
+            self.assertFalse(self.jobs)
+            clock.return_value = 130
+            self.app.process_submissions()
+            self.app.process_submissions()
+            self.assertEqual(len(self.jobs), 1)
+            self.run_job()
+            self.assertEqual(self.client.submit.call_args.args[0].id, "0")
+            self.assertIn("5秒", self.app.list.item("1", "text"))
+            clock.return_value = 135
+            self.app.process_submissions()
+            self.run_job()
+            self.assertEqual(self.client.submit.call_count, 2)
+
+    def test_retime_queued_work_and_shorter_delay(self):
+        self.select_delay("10秒")
+        self.app.auto_btn.invoke()
+        with patch("raindesk.desk.time.monotonic", return_value=10) as clock:
+            self.release(2)
+            self.run_job()
+            clock.return_value = 20
+            self.app.process_submissions()
+            self.select_delay("1分钟")
+            self.run_job()  # Even a queued worker observes the longer delay.
+            self.client.submit.assert_not_called()
+            self.assertIn("50秒", self.app.review_state.get())
+            clock.return_value = 47
+            self.select_delay("30秒")  # 37 seconds already elapsed.
+            self.run_job()
+            self.assertEqual(self.app.current.receipt["mode"], "自动")
+            self.assertFalse(self.jobs)
+
+    def test_manual_review_cancels_timer_and_deadline_never_sends_early(self):
+        self.app.auto_btn.invoke()
+        with patch("raindesk.ui.simpledialog.askinteger", return_value=250):
+            self.select_delay("自定义…")
+        self.release(0)
+        self.run_job()
+        self.assertIn("可提前手动提交", self.app.review_state.get())
+        self.app.send_btn.invoke()
+        self.assertIsNone(self.app.current.pending)
+        button(self.app.active_dialog, "确认提交").invoke()
+        self.run_job()
+        self.assertEqual(self.app.current.receipt["mode"], "手动")
+        self.release(1)
+        self.run_job()
+        self.stream.handle({"op": "lockproblem", "problem": {"prob": "1"}})
+        self.select_delay("立即")
+        self.assertEqual(self.app.review_state.get(), "已截止")
+        self.assertFalse(self.jobs)
+        self.assertEqual(self.client.submit.call_count, 1)
+
+    def test_disconnect_edits_and_disabling_revoke_pending_answers(self):
+        self.select_delay("10秒")
+        self.app.auto_btn.invoke()
+        self.release(0)
+        self.run_job()
+        self.app.editor.insert("end", "修改")
+        self.app.edit()
+        self.release(1)
+        self.run_job()
+        self.app.auto_btn.invoke()
+        self.app.auto_btn.invoke()
+        self.release(2)
+        self.run_job()
+        self.release(3)  # The generation also spans the disconnection.
+        self.app.receive("offline", "演练断开")
+        self.app.receive("connected", None)
+        self.run_job()
+        self.select_delay("立即")
+        self.assertFalse(self.jobs)
+        self.assertTrue(all(e.pending is None for e in self.app.entries))
+        self.client.submit.assert_not_called()
 
     def test_button_changes_future_releases_and_preserves_signature(self):
         self.release(0)
@@ -219,3 +325,62 @@ class AutoSubmitWorkflow(unittest.TestCase):
         field.delete(0, "end")
         button(win, "保存设置").invoke()
         self.assertNotIn("deepseek_api_key", self.app.config)
+
+    def test_remember_model_and_credentials_across_services_and_reopen(self):
+        self.app.config.update(model="legacy-gpt", paths={"WorkBuddy": "example.cmd"})
+
+        def open_settings():
+            self.app.settings()
+            win = next(widgets(self.root, tk.Toplevel))
+            provider, model = widgets(win, ttk.Combobox)
+            secret = next(f for f in widgets(win, ttk.Entry) if "show" in f.keys() and f.cget("show") == "*")
+            return win, provider, model, secret
+
+        def select(widget, name):
+            widget.set(name)
+            widget.event_generate("<<ComboboxSelected>>")
+
+        win, provider, model, secret = open_settings()
+        self.assertEqual(model.get(), "legacy-gpt")
+        select(provider, "Claude")
+        model.set("example-sonnet")
+        secret.insert(0, "example-claude-key")
+        select(provider, "Gemini")
+        self.assertEqual(secret.get(), "")
+        model.set("example-flash")
+        secret.insert(0, "example-gemini-key")
+        select(provider, "Claude")
+        self.assertEqual((model.get(), secret.get()), ("example-sonnet", "example-claude-key"))
+        model.set("example-haiku")
+        button(win, "保存设置").invoke()
+        saved = self.store.call_args.args[1]
+        self.assertEqual(saved["model_history"]["Claude"][:2], ["example-haiku", "example-sonnet"])
+        self.assertEqual(saved["gemini_api_key"], "example-gemini-key")
+        self.assertEqual(saved["paths"]["WorkBuddy"], "example.cmd")
+
+        with patch("raindesk.ui.load_private", return_value=dict(saved)):
+            second = App(tk.Tk(), demo=True)
+        self.addCleanup(second.close)
+        menu = second.model_menu
+        menu.invoke("Claude · example-sonnet")
+        self.assertEqual(second.config["model_history"]["Claude"][0], "example-sonnet")
+        menu.invoke("Gemini · example-flash")
+        self.assertEqual((second.config["provider"], second.config["gemini_api_key"]), ("Gemini", "example-gemini-key"))
+        self.assertEqual(second.config["claude_api_key"], "example-claude-key")
+        self.assertEqual(second.config["model"], "legacy-gpt")
+
+    def test_quick_model_switch_applies_to_next_generation(self):
+        self.app.config["claude_api_key"] = "example-claude-key"
+        with patch("raindesk.solver.ask_gpt", return_value={"items": ["1"]}) as gpt, \
+                patch("raindesk.solver.ask_api", return_value={"items": ["2"]}) as api:
+            self.release(0)
+            self.app.use_model("Claude", "new-model")
+            self.run_job()
+            gpt.assert_called_once()
+            api.assert_not_called()
+            self.release(1)
+            self.run_job()
+            self.assertEqual(api.call_args.args[0], "Claude")
+            self.assertEqual(api.call_args.args[-2:], ("example-claude-key", "new-model"))
+        self.assertEqual([e.text for e in self.app.entries], ["1", "2"])
+        self.client.submit.assert_not_called()

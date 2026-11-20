@@ -1,6 +1,6 @@
 # RainDesk · 雨课堂自动答题程序
 
-RainDesk 是面向**标准版雨课堂随堂习题**的 Windows 自动答题程序。老师发布题目后，程序自动读取题干、选项和课件图，调用所选 AI 作答。默认由本人逐题确认，也可以在课堂工具栏勾选 **「允许自动提交答案」**。
+RainDesk 是面向**标准版雨课堂随堂习题**的 Windows 自动答题程序。老师发布题目后，程序读取题干、选项和课件图，调用所选 AI 作答。支持 GPT、DeepSeek、GLM、Claude、Gemini 等解题服务，可记住多个模型并随时切换。默认由本人逐题确认，也可以设置自动提交的缓冲时间。
 
 [下载 Windows x64 发行版](https://github.com/Yanxxzz/rainclassroom-assistant/releases/latest)
 
@@ -10,8 +10,10 @@ RainDesk 是面向**标准版雨课堂随堂习题**的 Windows 自动答题程�
 2. 选择进行中的课程并点击「进入并监听」。老师发题后，左侧会出现题目。切换课堂时点击「刷新」，选择新课堂后再次进入。
 3. 在「设置」中填写自己的姓名和学号。主观题第一行使用这段署名。填空题每行一空，选择和判断题按原始选项编号作答。
 4. 初次使用时，**「允许自动提交答案」默认关闭**。可以编辑草稿，点击「核对并提交」查看完整内容，再点击「确认提交」。
-5. 勾选开关后，后续实时发布的题目在 AI 生成有效答案时自动发送。关闭开关会取消尚未发出的自动提交。开关状态保存在本机。已有草稿、重连读到的历史题和手动重新生成的答案都留待核对。
+5. 勾选开关后，用旁边的「提交延时」选择 **10秒（默认）、30秒、1分钟、自定义秒数或立即提交**。每道新题从有效答案生成时独立倒计时。修改延时会计入已经等过的时间。延时超过作答期限时，界面提示可提前手动提交，题目一旦截止就取消发送。
 6. 成功后点击「查看提交回执」，可查看提交方式、时间、雨课堂业务状态码和完整答案。已在微信完成的题可点「已在微信作答」。若点错，在同一位置点「撤销微信作答标记」，即可恢复草稿。题目仍开放且尚无草稿时会重新解题。核对后点「核对并提交」即可发送。若之前的提交回执不明确，撤销后先在微信核对提交记录。
+
+缓冲期间可以编辑答案、重新解题或点「核对并提交」接手本题。以上操作会取消该题的自动发送。关闭自动提交、课堂断线或切换课堂会取消已有倒计时。重连读到的历史题和手动重解的题均留待本人核对。
 
 ### AI 的答题风格
 
@@ -32,15 +34,27 @@ RainDesk 是面向**标准版雨课堂随堂习题**的 Windows 自动答题程�
 
 ## 解题服务
 
-默认使用本机已登录 ChatGPT 的 Codex CLI。需要能运行 codex exec 的近期版本。CLI 必须可从 PATH 找到，模型留空时使用其默认 GPT。账号按本机登录状态计量使用。
+在「设置 → 解题服务」选择服务，填写或导入该服务的密钥，选择模型后点「保存设置」。同一服务的模型共用该服务的密钥，只需配置一次。要添加同一服务的第二个模型，输入新的模型 ID 并保存。以后在主窗口点 **「切换模型」** 就能直接选用，新题和手动重新解题会使用新选择。程序重启后会恢复上次的模型、各服务的密钥和程序路径。
 
-在「设置 → 解题服务」也可选择 WorkBuddy 或 DeepSeek Harness。各服务使用同一份作答要求。
+密钥可直接粘贴，也可从单行 `.txt` 或 `.env` 文件导入。一个 `.env` 里可以放多家的密钥，导入时只读取所选服务对应的变量。清空某家密钥并保存即可移除该密钥。
 
-- **DeepSeek 官方 API**。选中「DeepSeek Harness」后，粘贴自己的 API 密钥，或点「从文件导入」选择单行密钥 `.txt` 或含 `DEEPSEEK_API_KEY=…` 的 `.env` 文件。程序路径留空，保存后即可使用官方 API 处理题目文字和图片。密钥按当前 Windows 用户加密保存，清空密钥并保存即可移除。可从 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 获取密钥。
-- **本机 DeepSeek Harness**。选择已安装的 Harness 程序或 CLI 路径即可沿用其配置。也可导入密钥供本次启动的 Harness 使用。若 CLI 已在 PATH 中且使用自己的密钥配置，程序路径和密钥均可留空。Harness 的 headless 接口接收题干、选项和同页课件文字。
-- **WorkBuddy**。选择程序或 CodeBuddy CLI，在其客户端或 CLI 中完成登录。无头模式可接收题目文字和图片。
+| 解题服务 | 初次配置 |
+| --- | --- |
+| GPT | 默认使用本机已登录 ChatGPT 的 Codex CLI，支持默认模型及自定义模型 ID。[Codex 文档](https://developers.openai.com/codex/noninteractive/) |
+| OpenAI API | 使用独立的 `OPENAI_API_KEY`。[OpenAI API 文档](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) |
+| DeepSeek Harness | 导入 `DEEPSEEK_API_KEY` 并留空程序路径即可使用官方 API。选择本机 Harness 路径可沿用其配置，选择「服务默认」会保留 Harness 的模型路由。Harness 模式使用题面文字。[官方 API](https://api-docs.deepseek.com/) · [Harness 配置](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/cli-help.md) |
+| WorkBuddy | 选择本机程序或已登录的 CodeBuddy CLI，可填写模型别名。[官方 CLI 文档](https://www.workbuddy.cn/docs/cli/cli-reference) |
+| GLM | 智谱开放平台的 `ZHIPUAI_API_KEY`。[智谱文档](https://docs.bigmodel.cn/cn/api/introduction) |
+| Claude | Anthropic 的 `ANTHROPIC_API_KEY`。[Claude Messages 文档](https://platform.claude.com/docs/en/api/messages/create) |
+| Gemini | Google AI Studio 的 `GEMINI_API_KEY` 或 `GOOGLE_API_KEY`。[Gemini 文档](https://ai.google.dev/api/generate-content) |
+| 通义千问 | 阿里云百炼中国内地的 `DASHSCOPE_API_KEY`。[百炼文档](https://help.aliyun.com/zh/model-studio/qwen-vl-compatible-with-openai) |
+| Kimi | 月之暗面国内平台的 `MOONSHOT_API_KEY`。[Kimi 模型列表](https://platform.kimi.com/docs/models) |
+| 豆包 | 火山方舟北京地域的 `ARK_API_KEY`，填写已开通的模型或接入点 ID。[方舟文档](https://www.volcengine.com/docs/82379/1494384) |
+| Grok | xAI 的 `XAI_API_KEY`，填写账户可用的模型 ID。[xAI 文档](https://docs.x.ai/developers/model-capabilities/legacy/chat-completions) |
+| OpenRouter | `OPENROUTER_API_KEY` 和所选模型的完整 ID。[OpenRouter 文档](https://openrouter.ai/docs/api/reference/overview) |
+| 硅基流动 | 国内平台的 `SILICONFLOW_API_KEY` 和完整模型 ID。[硅基流动文档](https://docs.siliconflow.cn/cn/api-reference/chat-completions/chat-completions) |
 
-[OpenAI 非交互调用文档](https://learn.chatgpt.com/docs/non-interactive-mode) · [WorkBuddy CLI 文档](https://www.workbuddy.cn/docs/cli/headless) · [DeepSeek API 文档](https://api-docs.deepseek.com/) · [DeepSeek Harness 凭据配置](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/headless/README.zh.md)
+云端 API 会接收当前题目的文字及可用的题面图片。含图题请选择该平台支持图片输入的模型。
 
 ## 数据与回执
 

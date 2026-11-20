@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from raindesk.providers import PROVIDERS, SolverError
+from raindesk.providers import CLI_PROVIDERS, PROVIDERS, SolverError
 from raindesk.question import Question
 from raindesk.solver import format_reply, solve
 
@@ -20,7 +20,7 @@ class AnswerWording(unittest.TestCase):
         q = question("有多少个函数？其中有多少个单射？")
         replies = [{"items": ["125个函数，60个单射"]}, {"items": ["125 个", "60 个"]}]
         for provider in PROVIDERS:
-            ask = "ask_gpt" if provider == "GPT" else "ask_external"
+            ask = "ask_gpt" if provider == "GPT" else ("ask_external" if provider in CLI_PROVIDERS else "ask_api")
             with self.subTest(provider=provider), patch("raindesk.solver." + ask, side_effect=replies) as model:
                 self.assertEqual(solve(q, {"provider": provider}), ("125个；60个", ""))
                 self.assertEqual(model.call_count, 2)

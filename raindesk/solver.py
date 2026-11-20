@@ -12,7 +12,7 @@ import requests
 
 from .mathtext import MATH_STYLE, MathMarkupError, plain_math
 from .question import TYPES
-from .providers import SolverError, ask_deepseek, ask_external
+from .providers import API_SERVICES, CLI_PROVIDERS, SolverError, ask_api, ask_external, model_history
 from .wording import SubanswerFormatError, chinese_spacing, join_subanswers
 
 
@@ -140,11 +140,13 @@ def solve(q, settings, picture=None, image_error=""):
         raise SolverError(image_error)
     provider = settings.get("provider", "GPT")
     path = settings.get("paths", {}).get(provider, "")
-    key = settings.get("deepseek_api_key", "") if provider == "DeepSeek Harness" else ""
-    direct_api = bool(key and not path.strip())
+    service = API_SERVICES.get(provider)
+    key = settings.get(service.key_field, "") if service else ""
+    model = model_history(settings, provider)[0]
+    use_cli = provider in CLI_PROVIDERS and not (provider == "DeepSeek Harness" and key and not path.strip())
     include_steps = settings.get("include_steps") is True
     prompt = make_prompt(q, include_steps)
-    if provider == "DeepSeek Harness" and not direct_api and picture:
+    if provider == "DeepSeek Harness" and use_cli and picture:
         image_error = "DeepSeek Harness 的 headless 输入使用本页文字。"
         if not (q.body or q.context or any(v for _, v in q.options)):
             raise SolverError("此题需要读取图片，请选择支持图片的解题服务。")
@@ -152,13 +154,13 @@ def solve(q, settings, picture=None, image_error=""):
 
     for attempt in range(2):
         if provider == "GPT":
-            reply = ask_gpt(prompt, picture, settings.get("model", ""))
-        elif direct_api:
-            reply = ask_deepseek(prompt, picture, key)
-        elif provider == "DeepSeek Harness":
-            reply = ask_external(provider, prompt, picture, path, deepseek_key=key)
+            reply = ask_gpt(prompt, picture, model)
+        elif use_cli:
+            reply = ask_external(provider, prompt, picture, path, deepseek_key=key, model=model)
+        elif service:
+            reply = ask_api(provider, prompt, picture, key, model)
         else:
-            reply = ask_external(provider, prompt, picture, path)
+            raise SolverError("请在设置中选择解题服务。")
         try:
             return format_reply(q, reply, image_error, include_steps=include_steps)
         except (MathMarkupError, SubanswerFormatError) as exc:

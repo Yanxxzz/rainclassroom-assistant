@@ -12,7 +12,7 @@ from raindesk.client import Lesson, RainClient, RainError
 from raindesk.desk import Desk
 from raindesk.live import LessonEvents
 from raindesk.question import Question
-from raindesk.providers import PROVIDERS, SolverError
+from raindesk.providers import CLI_PROVIDERS, PROVIDERS, SolverError
 from raindesk.solver import make_prompt, solve
 
 
@@ -181,7 +181,7 @@ class ClassroomWorkflow(unittest.TestCase):
         initial = {"items": [r"（1）\(\frac{a+b}{c+d}\)", r"（2）\binom{n}{k}"], "explanation": ""}
         rewritten = {"items": ["（1）(a+b)/(c+d)", "（2）C(n,k)"], "explanation": r"由 \(x^{2}≥0\)。"}
         for provider in PROVIDERS:
-            ask = "ask_gpt" if provider == "GPT" else "ask_external"
+            ask = "ask_gpt" if provider == "GPT" else ("ask_external" if provider in CLI_PROVIDERS else "ask_api")
             with self.subTest(provider=provider), patch("raindesk.solver." + ask,
                                                        side_effect=[initial, rewritten]) as model:
                 draft, why = solve(q, {"provider": provider, "include_steps": True})
